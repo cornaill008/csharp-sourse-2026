@@ -2,18 +2,12 @@
 # (SSH keys, other agent configs, etc). Track ONLY the Unity project here.
 /*
 
-!/Assets
-!/Assets/**
-!/Packages
-!/Packages/**
-!/ProjectSettings
-!/ProjectSettings/**
+!/Day09_Unity CLI
+!/Day09_Unity CLI/**
 !/.gitignore
 !/.gitattributes
 !/AGENTS.md
 !/CLAUDE.md
-!/Docs
-!/Docs/*.puml
 
 # Unity-generated / local-only content inside the tracked project
 [Ll]ibrary/
