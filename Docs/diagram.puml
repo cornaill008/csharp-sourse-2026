@@ -1,0 +1,189 @@
+@startuml diagram
+title 검색 화면 - Core / Domain / Data 클래스 다이어그램
+
+skinparam classAttributeIconSize 0
+
+package Core {
+
+  abstract class "Result<TData, TError>" as Result <<record>> {
+    -Result()
+  }
+
+  class "Success<TData, TError>" as ResultSuccess <<record>> {
+    +data : TData {readonly}
+  }
+
+  class "Error<TData, TError>" as ResultError <<record>> {
+    +error : TError {readonly}
+  }
+  note bottom of ResultError
+    Success/Error는 Result<TData, TError>의
+    중첩(nested) sealed record.
+    private 생성자로 외부에서 직접 상속 불가,
+    두 케이스만 존재하는 Discriminated Union.
+  end note
+
+  ResultSuccess --|> Result : 상속 (성공 케이스)
+  ResultError --|> Result : 상속 (실패 케이스)
+
+  class "PagedResult<T>" as PagedResult {
+    +PagedResult(items: IReadOnlyList<T>, hasMore: bool)
+    +Items : IReadOnlyList<T> {readonly}
+    +HasMore : bool {readonly}
+  }
+
+  enum NetworkError {
+    NetworkTimeout
+    NoInternet
+    NotFound
+    ServerError
+    Unknown
+  }
+}
+
+package Domain {
+
+  class ImageItem {
+    +ImageItem(id: string, thumbnailUrl: string, tags: IReadOnlyList<string>, authorName: string)
+    +Id : string {readonly}
+    +ThumbnailUrl : string {readonly}
+    +Tags : IReadOnlyList<string> {readonly}
+    +AuthorName : string {readonly}
+  }
+
+  class SearchQuery {
+    +SearchQuery(keyword: string)
+    +Keyword : string {readonly}
+  }
+  note right of SearchQuery
+    keyword가 빈 문자열/공백뿐이면
+    생성자에서 ArgumentException
+    (리뷰 항목: 프로젝트의 "실패는 Result" 규칙과
+    불일치 — 이번 반영 범위 밖이라 유지함)
+  end note
+
+  interface IImageSearchRepository {
+    +SearchAsync(query: SearchQuery, page: int, cancellationToken: CancellationToken) : UniTask<Result<PagedResult<ImageItem>, NetworkError>>
+  }
+
+  interface IThumbnailRepository {
+    +GetAsync(url: string, cancellationToken: CancellationToken) : UniTask<Result<byte[], NetworkError>>
+  }
+  note bottom of IThumbnailRepository
+    두 인터페이스 공통 계약:
+    취소는 Result.Error가 아니라
+    OperationCanceledException으로 전파된다.
+  end note
+}
+
+package Data {
+
+  class PixabaySearchResponseDto {
+    +totalHits : int
+    +total : int
+    +hits : List<PixabayHitDto>
+  }
+
+  class PixabayHitDto {
+    +id : long
+    +tags : string
+    +previewURL : string
+    +webformatURL : string
+    +user : string
+    +likes : int
+    +views : int
+  }
+
+  PixabaySearchResponseDto *-- PixabayHitDto : 포함 (hits 목록)
+
+  interface IPixabaySearchDataSource {
+    +SearchAsync(keyword: string, page: int, cancellationToken: CancellationToken) : UniTask<PixabaySearchResponseDto>
+  }
+  note top of IPixabaySearchDataSource
+    실패 시 예외:
+    - NetworkTimeoutException (내부 타임아웃)
+    - NetworkUnavailableException (연결 불가)
+    - PixabayApiException(statusCode) (비-2xx 응답)
+    - OperationCanceledException (호출자 취소, 그대로 전파)
+    그 외 알 수 없는 예외는 그대로 던짐
+  end note
+
+  interface IThumbnailDataSource {
+    +DownloadAsync(url: string, cancellationToken: CancellationToken) : UniTask<byte[]>
+  }
+  note bottom of IThumbnailDataSource
+    IPixabaySearchDataSource와 동일한
+    예외 계약을 따른다.
+  end note
+
+  class UnityWebRequestSearchDataSource {
+    +SearchAsync(keyword: string, page: int, cancellationToken: CancellationToken) : UniTask<PixabaySearchResponseDto>
+  }
+  class UnityWebRequestThumbnailDataSource {
+    +DownloadAsync(url: string, cancellationToken: CancellationToken) : UniTask<byte[]>
+  }
+
+  UnityWebRequestSearchDataSource ..|> IPixabaySearchDataSource : 구현
+  UnityWebRequestThumbnailDataSource ..|> IThumbnailDataSource : 구현
+  UnityWebRequestSearchDataSource ..> PixabaySearchResponseDto : 의존 (JSON 역직렬화 결과)
+
+  class ImageItemMapper {
+    +{static} ToModel(dto: PixabayHitDto) : ImageItem
+    -{static} ParseTags(raw: string) : IReadOnlyList<string>
+  }
+  note bottom of ImageItemMapper
+    ParseTags: "a, b, c" 형태의 문자열을
+    콤마로 split 후 각 항목 trim하여
+    빈 항목은 제거한 목록으로 변환
+  end note
+
+  ImageItemMapper ..> PixabayHitDto : 의존 (변환 입력)
+  ImageItemMapper ..> ImageItem : 의존 (변환 결과)
+
+  class PixabaySearchRepository {
+    -dataSource : IPixabaySearchDataSource
+    +PixabaySearchRepository(dataSource: IPixabaySearchDataSource)
+    +SearchAsync(query: SearchQuery, page: int, cancellationToken: CancellationToken) : UniTask<Result<PagedResult<ImageItem>, NetworkError>>
+  }
+  note bottom of PixabaySearchRepository
+    DataSource 호출 → ImageItemMapper로 변환 →
+    예외를 NetworkError로 매핑해 Result.Error 생성,
+    성공 시 Result.Success(PagedResult) 생성.
+    OperationCanceledException은 매핑하지 않고 재전파.
+  end note
+
+  class ThumbnailRepository {
+    -dataSource : IThumbnailDataSource
+    +ThumbnailRepository(dataSource: IThumbnailDataSource)
+    +GetAsync(url: string, cancellationToken: CancellationToken) : UniTask<Result<byte[], NetworkError>>
+  }
+
+  PixabaySearchRepository ..|> IImageSearchRepository : 구현
+  ThumbnailRepository ..|> IThumbnailRepository : 구현
+
+  PixabaySearchRepository ..> IPixabaySearchDataSource : 의존 (생성자 주입, DIP)
+  PixabaySearchRepository ..> ImageItemMapper : 의존
+  PixabaySearchRepository ..> ImageItem : 의존 (매핑 결과 조립)
+  PixabaySearchRepository ..> PagedResult : 의존 (Core)
+  PixabaySearchRepository ..> Result : 의존 (Core)
+  PixabaySearchRepository ..> NetworkError : 의존 (Core, 예외 매핑 결과)
+
+  ThumbnailRepository ..> IThumbnailDataSource : 의존 (생성자 주입, DIP)
+  ThumbnailRepository ..> Result : 의존 (Core)
+  ThumbnailRepository ..> NetworkError : 의존 (Core, 예외 매핑 결과)
+}
+
+' ---- Domain -> Core 의존 ----
+
+IImageSearchRepository ..> SearchQuery : 의존 (검색 조건 파라미터)
+IImageSearchRepository ..> ImageItem : 의존 (검색 결과 항목)
+IImageSearchRepository ..> Result : 의존 (성공/실패 래핑)
+IImageSearchRepository ..> PagedResult : 포함 (페이지 결과가 ImageItem 목록을 담음)
+IImageSearchRepository ..> NetworkError : 의존 (실패 사유)
+
+IThumbnailRepository ..> Result : 의존 (성공/실패 래핑)
+IThumbnailRepository ..> NetworkError : 의존 (실패 사유)
+
+note "Service 계층은 이번 화면에서는 불필요하다고 판단되어 생략함\n(단일 Repository 호출만 필요, 조합 로직 없음)" as N1
+
+@enduml
